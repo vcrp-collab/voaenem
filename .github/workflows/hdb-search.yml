@@ -1,0 +1,43 @@
+name: Temporary HDB phone search
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hdb-search.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+auto-cancel: false
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - name: Check out workspace
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install browser automation
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Search Hemeroteca Digital Brasileira
+        run: python research/hdb_search.py
+
+      - name: Upload results and page images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdb-2481165-results
+          path: hdb_results/
+          if-no-files-found: warn
+          retention-days: 3
