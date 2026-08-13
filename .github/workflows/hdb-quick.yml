@@ -1,0 +1,34 @@
+name: Temporary HDB quick exact pass
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hdb-quick.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - name: Traverse exact HDB phone matches
+        run: python .tmp/hdb_quick.py
+      - name: Upload quick results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdb-2481165-quick
+          path: hdb_quick_results/
+          if-no-files-found: warn
+          retention-days: 3
