@@ -31,17 +31,33 @@ def main():
         )
         page = context.new_page()
         page.set_default_timeout(30000)
-        page.on('request', lambda r: report['requests'].append({'method':r.method,'url':r.url,'post_data':(r.post_data or '')[:30000]}) if r.method == 'POST' else None)
-        page.on('response', lambda r: report['responses'].append({'method':r.request.method,'url':r.url,'status':r.status,'content_type':r.headers.get('content-type','')}) if r.request.method == 'POST' else None)
+
+        def on_request(request):
+            if request.method == 'POST' and 'DocReaderMobile.aspx' in request.url:
+                report['requests'].append({'method':request.method,'url':request.url,'post_data':(request.post_data or '')[:30000]})
+        def on_response(response):
+            if response.request.method == 'POST' and 'DocReaderMobile.aspx' in response.url:
+                report['responses'].append({'method':response.request.method,'url':response.url,'status':response.status,'content_type':response.headers.get('content-type','')})
+        page.on('request', on_request)
+        page.on('response', on_response)
         page.on('console', lambda m: report['console'].append(f'{m.type}: {m.text}'))
         page.on('pageerror', lambda e: report['errors'].append(str(e)))
+
         try:
             bib, pf = TARGET['bib'], TARGET['pagfis']
             url = f'https://memoria.bn.gov.br/DocReader/DocReaderMobile.aspx?bib={bib}&PagFis={pf}&Pesq=2481165'
             page.goto(url, wait_until='domcontentloaded', timeout=90000)
-            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_selector('#form1', state='attached', timeout=90000)
+            except Exception:
+                page.wait_for_timeout(12000)
+                page.reload(wait_until='domcontentloaded', timeout=90000)
+                page.wait_for_selector('#form1', state='attached', timeout=90000)
+            page.wait_for_selector('#HiddenSize', state='attached', timeout=30000)
+            page.wait_for_timeout(1500)
             report['steps'].append({'step':'initial','url':page.url,'hidden_size':get_attr(page,'#HiddenSize','value'),'pagfis':get_attr(page,'#PagFisHid','value'),'documento_count':page.locator('#DocumentoImg').count()})
             (HTML/'initial.html').write_text(page.content(), encoding='utf-8')
+
             with page.expect_navigation(wait_until='domcontentloaded', timeout=120000):
                 page.evaluate("""pf => {
                     const f=document.getElementById('form1');
