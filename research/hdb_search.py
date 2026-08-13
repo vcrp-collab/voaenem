@@ -1,42 +1,80 @@
 import json
+import re
 import time
 import traceback
+from datetime import date, timedelta
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote
 
 from playwright.sync_api import sync_playwright
 
 OUT = Path("hdb_results")
-IMG = OUT / "images"
-HTML = OUT / "html"
 OUT.mkdir(exist_ok=True)
-IMG.mkdir(exist_ok=True)
-HTML.mkdir(exist_ok=True)
 
-TARGETS = [
-    {"bib": "028274_03", "pagfis": "116342", "date": "1988-07-31", "issue": "09236", "page": "44"},
-    {"bib": "028274_03", "pagfis": "121730", "date": "1988-12-04", "issue": "09362", "page": "47"},
-    {"bib": "028274_03", "pagfis": "122022", "date": "1988-12-11", "issue": "09369", "page": "53"},
-    {"bib": "028274_03", "pagfis": "125219", "date": "1989-03-05", "issue": "09453", "page": "29"},
+COLLECTIONS = [
+    {"bib": "028274_03", "years": {1988, 1989}},
+    {"bib": "028274_04", "years": {1990, 1991}},
 ]
+
+QUERIES = [
+    {"name": "joined", "value": "2481165", "confidence": "exact"},
+    {"name": "quoted-space", "value": '"248 1165"', "confidence": "exact-tokenized"},
+    {"name": "joined-l165", "value": "248l165", "confidence": "ocr"},
+    {"name": "joined-1l65", "value": "2481l65", "confidence": "ocr"},
+    {"name": "joined-ll65", "value": "248ll65", "confidence": "ocr"},
+    {"name": "joined-I165", "value": "248I165", "confidence": "ocr"},
+    {"name": "joined-116S", "value": "248116S", "confidence": "ocr"},
+    {"name": "joined-I16S", "value": "248I16S", "confidence": "ocr"},
+    {"name": "joined-ll6S", "value": "248ll6S", "confidence": "ocr"},
+    {"name": "joined-Z48", "value": "Z481165", "confidence": "ocr"},
+    {"name": "joined-24B", "value": "24B1165", "confidence": "ocr"},
+    {"name": "quoted-l165", "value": '"248 l165"', "confidence": "ocr-tokenized"},
+    {"name": "quoted-1l65", "value": '"248 1l65"', "confidence": "ocr-tokenized"},
+    {"name": "quoted-I165", "value": '"248 I165"', "confidence": "ocr-tokenized"},
+    {"name": "quoted-116S", "value": '"248 116S"', "confidence": "ocr-tokenized"},
+]
+
+BASE_ISSUE = 9250
+BASE_DATE = date(1988, 8, 14)
+
+
+def txt(page, selector):
+    try:
+        return (page.locator(selector).text_content(timeout=2500) or "").strip()
+    except Exception:
+        return ""
+
+
+def val(page, selector):
+    try:
+        return page.locator(selector).get_attribute("value", timeout=2500) or ""
+    except Exception:
+        return ""
 
 
 def attr(page, selector, name):
     try:
-        return page.locator(selector).get_attribute(name, timeout=4000) or ""
+        return page.locator(selector).get_attribute(name, timeout=2500) or ""
     except Exception:
         return ""
 
 
-def value(page, selector):
-    return attr(page, selector, "value")
+def parse_counter(label):
+    m = re.search(r"(\d+)\s*/\s*(\d+)", label or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
 
-def text(page, selector):
-    try:
-        return (page.locator(selector).text_content(timeout=4000) or "").strip()
-    except Exception:
-        return ""
+def parse_folder(folder):
+    ym = re.search(r"Ano\s+(\d{4})", folder or "", re.I)
+    em = re.search(r"Edi(?:ç|c)ão\s+(\d+)", folder or "", re.I)
+    year = int(ym.group(1)) if ym else None
+    issue = em.group(1) if em else ""
+    if issue:
+        d = BASE_DATE + timedelta(days=int(issue) - BASE_ISSUE)
+        ds, weekday = d.isoformat(), d.strftime("%A")
+    else:
+        ds = weekday = ""
+    return year, issue, ds, weekday
 
 
 def close_modal(page):
@@ -46,24 +84,59 @@ def close_modal(page):
     ]:
         try:
             loc = page.locator(selector).first
-            if loc.is_visible(timeout=800):
-                loc.click(force=True, timeout=3000)
+            if loc.is_visible(timeout=700):
+                loc.click(force=True, timeout=2000)
                 return
         except Exception:
             pass
 
 
-def save_response_body(response, target):
+def next_occurrence(page, old_label, old_pagfis):
     try:
-        body = response.body()
-        target.write_bytes(body)
-        return str(target)
+        page.locator("#OcorPosBtn").click(force=True, timeout=10000)
     except Exception:
-        return ""
+        try:
+            page.evaluate("document.querySelector('#OcorPosBtn').click()")
+        except Exception:
+            return False
+    try:
+        page.wait_for_function(
+            "s => { const l=document.querySelector('#OcorNroLbl'); const p=document.querySelector('#hPagFis'); return (l && (l.textContent||'').trim() !== s.label) || (p && p.value !== s.pagfis); }",
+            arg={"label": old_label, "pagfis": old_pagfis},
+            timeout=35000,
+        )
+        return True
+    except Exception:
+        page.wait_for_timeout(1000)
+        return txt(page, "#OcorNroLbl") != old_label or val(page, "#hPagFis") != old_pagfis
+
+
+def wait_query(page, expected):
+    deadline = time.time() + 18
+    state = {}
+    while time.time() < deadline:
+        state = {
+            "counter": txt(page, "#OcorNroLbl"),
+            "query": val(page, "#PesquisarTxt"),
+            "folder": attr(page, "#PastaTxt", "title"),
+        }
+        _, total = parse_counter(state["counter"])
+        if total is not None and state["query"].strip() == expected.strip():
+            return state
+        time.sleep(0.35)
+    return state
 
 
 def main():
-    report = {"started": time.time(), "targets": [], "errors": []}
+    result = {
+        "started": time.time(),
+        "queries": QUERIES,
+        "runs": [],
+        "rows": [],
+        "errors": [],
+    }
+    seen_variant_occurrences = set()
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -72,136 +145,107 @@ def main():
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151 Safari/537.36",
             locale="pt-BR",
-            viewport={"width": 1920, "height": 1400},
-            screen={"width": 1920, "height": 1400},
+            viewport={"width": 1600, "height": 1200},
             ignore_https_errors=True,
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
-        for target in TARGETS:
-            bib = target["bib"]
-            pagfis = target["pagfis"]
-            stem = f"{bib}_{target['date']}_{target['issue']}_{pagfis}_p{target['page']}"
-            item = dict(target)
-            item.update({
-                "url": f"https://memoria.bn.gov.br/DocReader/DocReader.aspx?bib={bib}&pagfis={pagfis}",
-                "folder": "", "page_read": "", "hidden_id": "", "hidden_size": "",
-                "image_src": "", "image_file": "", "element_screenshot": "", "full_screenshot": "",
-                "export_url": "", "export_html": "", "export_screenshot": "",
-                "network": [], "console": [], "page_errors": [], "error": "",
-            })
-            report["targets"].append(item)
-            page = context.new_page()
-            page.set_default_timeout(30000)
-
-            def on_response(response):
-                url = response.url
-                lower = url.lower()
-                if any(token in lower for token in ["documento", "imagem", "image", ".jpg", ".jpeg", ".png", "pdfexport", "carregaimagem"]):
-                    item["network"].append({
-                        "url": url,
-                        "status": response.status,
-                        "content_type": response.headers.get("content-type", ""),
-                    })
-
-            page.on("response", on_response)
-            page.on("console", lambda msg: item["console"].append(f"{msg.type}: {msg.text}"))
-            page.on("pageerror", lambda exc: item["page_errors"].append(str(exc)))
-
-            try:
-                print(f"\n=== {item['url']} ===", flush=True)
-                page.goto(item["url"], wait_until="domcontentloaded", timeout=90000)
-                close_modal(page)
-                page.wait_for_selector("#hPagFis", state="attached", timeout=60000)
-                item["folder"] = attr(page, "#PastaTxt", "title")
-                item["page_read"] = value(page, "#PagAtualTxt")
-                item["hidden_id"] = value(page, "#HiddenID")
-
-                page.evaluate(
-                    "pf => {"
-                    "  const hs=document.getElementById('HiddenSize');"
-                    "  if (hs) hs.value='1400x1150';"
-                    "  if (typeof ajustadiv==='function') { try { ajustadiv(1400,1150); } catch(e) {} }"
-                    "  const hp=document.getElementById('hPagFis'); if (hp) hp.value=pf;"
-                    "  if (typeof PagCarrega==='function') PagCarrega(pf);"
-                    "  else { const b=document.getElementById('CarregaImagemHiddenButton'); if (b) b.click(); }"
-                    "}",
-                    pagfis,
-                )
-                item["hidden_size"] = value(page, "#HiddenSize")
-
+        for collection in COLLECTIONS:
+            bib = collection["bib"]
+            years = collection["years"]
+            for query in QUERIES:
+                page = context.new_page()
+                page.set_default_timeout(25000)
+                encoded = quote(query["value"], safe="")
+                url = f"https://memoria.bn.gov.br/DocReader/DocReader.aspx?bib={bib}&Pesq={encoded}"
+                run = {
+                    "bib": bib, "query": query, "url": url, "status": "started",
+                    "counter": "", "total": 0, "visited": 0, "matched": 0, "error": "",
+                }
+                result["runs"].append(run)
+                print(f"\n=== {bib} | {query['name']} | {query['value']} ===", flush=True)
                 try:
-                    page.wait_for_function(
-                        "() => { const i=document.querySelector('#DocumentoImg'); return !!(i && i.getAttribute('src')); }",
-                        timeout=120000,
-                    )
+                    page.goto(url, wait_until="domcontentloaded", timeout=90000)
+                    close_modal(page)
+                    state = wait_query(page, query["value"])
+                    run["counter"] = state.get("counter", "")
+                    run["observed_query"] = state.get("query", "")
+                    current, total = parse_counter(run["counter"])
+                    run["total"] = total or 0
+                    print(json.dumps(state, ensure_ascii=False), flush=True)
+
+                    if total is None or total == 0:
+                        run["status"] = "no-results"
+                        continue
+                    if total > 350:
+                        run["status"] = "skipped-too-many"
+                        run["error"] = f"{total} results exceeds safety cap"
+                        continue
+
+                    for _ in range(total):
+                        label = txt(page, "#OcorNroLbl")
+                        n, t = parse_counter(label)
+                        folder = attr(page, "#PastaTxt", "title")
+                        year, issue, ds, weekday = parse_folder(folder)
+                        pagfis = val(page, "#hPagFis")
+                        pageno = val(page, "#PagAtualTxt")
+                        run["visited"] += 1
+
+                        if year in years:
+                            key = (bib, query["name"], pagfis, label)
+                            if key not in seen_variant_occurrences:
+                                seen_variant_occurrences.add(key)
+                                row = {
+                                    "bib": bib,
+                                    "query_name": query["name"],
+                                    "query_value": query["value"],
+                                    "confidence": query["confidence"],
+                                    "counter": label,
+                                    "year": year,
+                                    "issue": issue,
+                                    "date": ds,
+                                    "weekday": weekday,
+                                    "is_sunday": weekday == "Sunday",
+                                    "page": pageno,
+                                    "pagfis": pagfis,
+                                    "folder": folder,
+                                    "link": f"https://memoria.bn.gov.br/DocReader/{bib}/{pagfis}" if pagfis else page.url,
+                                }
+                                result["rows"].append(row)
+                                run["matched"] += 1
+                                if row["is_sunday"]:
+                                    print("SUNDAY " + json.dumps(row, ensure_ascii=False), flush=True)
+
+                        if n is not None and n >= total:
+                            break
+                        if not next_occurrence(page, label, pagfis):
+                            run["error"] = f"could not advance after {label} / {pagfis}"
+                            break
+                    run["status"] = "completed" if not run["error"] else "partial"
                 except Exception as exc:
-                    item["page_errors"].append(f"image wait: {type(exc).__name__}: {exc}")
-
-                src = attr(page, "#DocumentoImg", "src")
-                item["image_src"] = src
-                if src:
-                    try:
-                        response = context.request.get(urljoin(page.url, src), timeout=90000, headers={"Referer": page.url})
-                        ctype = response.headers.get("content-type", "")
-                        ext = ".jpg" if "jpeg" in ctype else ".png" if "png" in ctype else ".bin"
-                        image_path = IMG / f"{stem}{ext}"
-                        image_path.write_bytes(response.body())
-                        item["image_file"] = str(image_path)
-                    except Exception as exc:
-                        item["page_errors"].append(f"image download: {type(exc).__name__}: {exc}")
-
-                    try:
-                        elshot = IMG / f"{stem}_element.png"
-                        page.locator("#DocumentoImg").screenshot(path=str(elshot), timeout=90000)
-                        item["element_screenshot"] = str(elshot)
-                    except Exception as exc:
-                        item["page_errors"].append(f"element screenshot: {type(exc).__name__}: {exc}")
-
-                fullshot = IMG / f"{stem}_full.png"
-                page.screenshot(path=str(fullshot), full_page=True, timeout=90000)
-                item["full_screenshot"] = str(fullshot)
-                page_html = HTML / f"{stem}_docreader.html"
-                page_html.write_text(page.content(), encoding="utf-8")
-
-                hidden_id = item["hidden_id"]
-                if hidden_id:
-                    export_url = f"https://memoria.bn.gov.br/DocReader/PDFExportAnx.aspx?id={hidden_id}&pagfis={pagfis}&bib={bib}"
-                    item["export_url"] = export_url
-                    export_page = context.new_page()
-                    try:
-                        export_page.goto(export_url, wait_until="domcontentloaded", timeout=90000)
-                        export_page.wait_for_timeout(3000)
-                        export_html_path = HTML / f"{stem}_export.html"
-                        export_html_path.write_text(export_page.content(), encoding="utf-8")
-                        item["export_html"] = str(export_html_path)
-                        export_shot = IMG / f"{stem}_export.png"
-                        export_page.screenshot(path=str(export_shot), full_page=True, timeout=90000)
-                        item["export_screenshot"] = str(export_shot)
-                        item["export_links"] = export_page.locator("a").evaluate_all(
-                            "els => els.map(a => ({text:(a.innerText||'').trim(), href:a.href})).filter(x => x.href)"
-                        )
-                        item["export_inputs"] = export_page.locator("input,button,select").evaluate_all(
-                            "els => els.map(e => ({tag:e.tagName,id:e.id,name:e.name,type:e.type,value:e.value,title:e.title})).slice(0,150)"
-                        )
-                    except Exception as exc:
-                        item["page_errors"].append(f"export page: {type(exc).__name__}: {exc}")
-                    finally:
-                        export_page.close()
-
-                print(json.dumps({k: item.get(k) for k in ["date","folder","page_read","hidden_id","hidden_size","image_src","image_file","export_url","page_errors"]}, ensure_ascii=False), flush=True)
-            except Exception as exc:
-                item["error"] = f"{type(exc).__name__}: {exc}"
-                report["errors"].append({"target": target, "error": item["error"], "traceback": traceback.format_exc()})
-                print(traceback.format_exc(), flush=True)
-            finally:
-                page.close()
-                (OUT / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                    run["status"] = "error"
+                    run["error"] = f"{type(exc).__name__}: {exc}"
+                    result["errors"].append({
+                        "bib": bib, "query": query, "error": run["error"],
+                        "traceback": traceback.format_exc(),
+                    })
+                    print(traceback.format_exc(), flush=True)
+                finally:
+                    page.close()
+                    (OUT / "results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
         browser.close()
 
-    report["finished"] = time.time()
-    (OUT / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    result["finished"] = time.time()
+    sunday_pages = {}
+    for row in result["rows"]:
+        if row["is_sunday"]:
+            key = f"{row['bib']}:{row['pagfis']}"
+            sunday_pages.setdefault(key, {"bib": row["bib"], "pagfis": row["pagfis"], "date": row["date"], "issue": row["issue"], "page": row["page"], "link": row["link"], "variants": []})
+            sunday_pages[key]["variants"].append({"name": row["query_name"], "value": row["query_value"], "confidence": row["confidence"]})
+    result["sunday_pages"] = list(sunday_pages.values())
+    (OUT / "results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"rows": len(result["rows"]), "sunday_pages": result["sunday_pages"]}, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
