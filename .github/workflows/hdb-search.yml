@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - ".github/workflows/hdb-search.yml"
+      - "research/**"
   workflow_dispatch:
 
 permissions:
