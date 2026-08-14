@@ -6,11 +6,11 @@ from urllib.parse import quote
 
 from playwright.sync_api import sync_playwright
 
-OUT = Path('hdb_date_results')
+OUT = Path('hdb_results')
 OUT.mkdir(exist_ok=True)
 MONTHS = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',7:'julho',8:'agosto',9:'setembro',10:'outubro',11:'novembro',12:'dezembro'}
 CANDIDATES = [
-('028274_03','113223','1165 classificados','1989' if False else '1988-05-15'),
+('028274_03','113223','1165 classificados','1988-05-15'),
 ('028274_03','116617','1165 classificados','1988-08-07'),
 ('028274_03','117203','1165 classificados','1988-08-21'),
 ('028274_03','118347','1165 classificados','1988-09-18'),
