@@ -1,4 +1,4 @@
-from hdb_phrase_test import main
+from hdb_exact_sundays import main
 
 if __name__ == '__main__':
     main()
