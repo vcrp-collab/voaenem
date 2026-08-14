@@ -1,0 +1,30 @@
+name: Temporary HDB candidate date validation
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hdb-date-validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - run: python research/hdb_date_validate.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdb-date-validation
+          path: hdb_date_results/
+          retention-days: 3
