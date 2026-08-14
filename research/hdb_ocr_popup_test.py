@@ -8,7 +8,8 @@ OUT = Path("hdb_results")
 OUT.mkdir(exist_ok=True)
 TARGETS = [
     {"bib": "028274_03", "pagfis": "117203", "query": "1165", "label": "page117203"},
-    {"bib": "028274_03", "pagfis": "116342", "query": "1165", "label": "page116342"},
+    {"bib": "028274_03", "pagfis": "116617", "query": "1165", "label": "page116617"},
+    {"bib": "028274_04", "pagfis": "27422", "query": "1165", "label": "page27422"},
 ]
 
 
@@ -22,18 +23,19 @@ def main():
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36",
-            locale="pt-BR",
-            viewport={"width": 1280, "height": 1800},
-            is_mobile=True,
-            has_touch=True,
-            ignore_https_errors=True,
+            locale="pt-BR", viewport={"width": 1280, "height": 1800},
+            is_mobile=True, has_touch=True, ignore_https_errors=True,
         )
         for target in TARGETS:
             item = dict(target)
-            item.update({"url": "", "button": False, "text": "", "body": "", "errors": [], "status": "started"})
+            item.update({"url": "", "text": "", "body": "", "posts": [], "errors": [], "status": "started"})
             report["targets"].append(item)
             page = context.new_page()
             page.on("pageerror", lambda exc, target_item=item: target_item["errors"].append(str(exc)))
+            def on_response(response, target_item=item):
+                if response.request.method == "POST" and "DocReader" in response.url:
+                    target_item["posts"].append({"url": response.url, "status": response.status, "content_type": response.headers.get("content-type", "")})
+            page.on("response", on_response)
             try:
                 url = f"https://memoria.bn.gov.br/DocReader/DocReaderMobile.aspx?bib={target['bib']}&PagFis={target['pagfis']}&Pesq={target['query']}"
                 item["url"] = url
@@ -45,9 +47,9 @@ def main():
                     page.reload(wait_until="domcontentloaded", timeout=90000)
                     page.wait_for_selector("#form1", state="attached", timeout=90000)
                 page.wait_for_selector("#TextoDigitadoBtn", state="attached", timeout=60000)
-                item["button"] = True
-                page.locator("#TextoDigitadoBtn").click(force=True, timeout=30000)
-                deadline = time.time() + 55
+                page.evaluate("document.getElementById('TextoDigitadoBtn').click()")
+                page.wait_for_timeout(5000)
+                deadline = time.time() + 50
                 while time.time() < deadline:
                     label = page.locator("#TextoDigitadoNotification_C_TextoDigitadoLbl")
                     if label.count():
